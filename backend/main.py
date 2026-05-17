@@ -1,17 +1,16 @@
 import io
 import os
-import csv
-import base64
 import numpy as np
 import xarray as xr
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+import pystac
 import pystac_client
 import planetary_computer
 from odc.stac import load
-import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap
 from PIL import Image
 from datetime import datetime, timedelta
@@ -21,39 +20,26 @@ import uuid
 from typing import Dict, Any, List
 from scipy.ndimage import median_filter
 
-app = FastAPI()
-
-# Read CORS from ENV
-ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*").split(",")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
 # Configuration
 TILE_SIZE_DEG = 0.05
 MAX_CONCURRENT_WORKERS = 4
-SAFE_RESOLUTION_DEG = 0.0005 # ~55m
-HIGH_RES_DEG = 0.0001 # ~11m
+SAFE_RESOLUTION_DEG = 0.0005  # ~55m
+HIGH_RES_DEG = 0.0001         # ~11m
 NDVI_THRESHOLD = 0.05
 
-class AnalyzeRequest(BaseModel):
-    bbox: list[float]  # [min_lon, min_lat, max_lon, max_lat]
-    before_date: str   # YYYY-MM-DD
-    after_date: str    # YYYY-MM-DD
-    safe_mode: bool = True
+cache = dc.Cache("terrawatch_cache")
+tile_queue = asyncio.Queue()
 
 catalog = pystac_client.Client.open(
     "https://planetarycomputer.microsoft.com/api/stac/v1",
     modifier=planetary_computer.sign_inplace,
 )
 
-cache = dc.Cache("terrawatch_cache")
-tile_queue = asyncio.Queue()
+class AnalyzeRequest(BaseModel):
+    bbox: list[float]  # [min_lon, min_lat, max_lon, max_lat]
+    before_date: str   # YYYY-MM-DD
+    after_date: str    # YYYY-MM-DD
+    safe_mode: bool = True
 
 # --- Helpers ---
 def get_best_item(bbox, date_str):
@@ -68,7 +54,7 @@ def get_best_item(bbox, date_str):
         item_dict = cache[stac_cache_key]
         if item_dict is None:
             return None
-        return pystac_client.Item.from_dict(item_dict)
+        return pystac.Item.from_dict(item_dict)
 
     search = catalog.search(
         collections=["sentinel-2-l2a"],
@@ -241,14 +227,35 @@ async def worker():
         finally:
             tile_queue.task_done()
 
-@app.on_event("startup")
-async def startup_event():
+# --- Application lifecycle (modern FastAPI pattern) ---
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup: spawn tile processing workers
+    worker_tasks = []
     for _ in range(MAX_CONCURRENT_WORKERS):
-        asyncio.create_task(worker())
-    
-    # Re-queue incomplete jobs on startup to ensure robustness
-    # For a true production system, you'd iterate over `cache` for incomplete jobs
-    pass
+        worker_tasks.append(asyncio.create_task(worker()))
+    yield
+    # Shutdown: cancel workers
+    for t in worker_tasks:
+        t.cancel()
+
+app = FastAPI(lifespan=lifespan)
+
+# Read CORS from ENV
+ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*").split(",")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# --- Health check for deployment platforms ---
+@app.get("/")
+async def health_check():
+    return {"status": "ok", "service": "TerraWatch API"}
 
 @app.post("/analyze")
 async def analyze(req: AnalyzeRequest):

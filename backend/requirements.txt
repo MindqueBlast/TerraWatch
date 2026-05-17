@@ -1,5 +1,6 @@
 fastapi
 uvicorn
+pystac
 pystac-client
 planetary-computer
 odc-stac
