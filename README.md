@@ -1,5 +1,7 @@
 # TerraWatch: Environmental Change Viewer
 
+<!-- Deployment trigger to force Vercel rebuild -->
+
 TerraWatch is a scalable, production-ready geospatial analytics platform designed to detect and visualize environmental changes using real satellite data. By comparing historical and current satellite imagery, the system highlights areas of vegetation loss (deforestation, droughts, natural disasters) and vegetation gain (regrowth, seasonal changes).
 
 ## 🚀 Key Features
